@@ -14,11 +14,11 @@ on:
         options: [changes, digest]
         default: changes
       dry_run:
-        description: "Slack に送らず状態も保存しない（ジョブサマリーで結果を確認）"
+        description: "メールを送らず状態も保存しない（ジョブサマリーと artifact の email_preview.html で確認）"
         type: boolean
         default: false
       no_notify:
-        description: "Slack に送らず状態だけ更新する（初回に既存の異常を一括通知したくない場合）"
+        description: "メールを送らず状態だけ更新する（初回に既存の異常を一括通知したくない場合）"
         type: boolean
         default: false
 
@@ -56,7 +56,12 @@ jobs:
       - name: Run monitor
         env:
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          MAIL_FROM: ${{ secrets.MAIL_FROM }}
+          MAIL_TO: ${{ secrets.MAIL_TO }}
           MODE: ${{ github.event.schedule == '30 23 * * 0' && 'digest' || inputs.mode || 'changes' }}
           EXTRA_ARGS: ${{ inputs.dry_run && '--dry-run' || '' }} ${{ inputs.no_notify && '--no-notify' || '' }}
         run: |

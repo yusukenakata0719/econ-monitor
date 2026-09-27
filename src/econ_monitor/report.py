@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import List
+from typing import Dict, List
 
+from econ_monitor.digest import SEVERITY_ORDER
 from econ_monitor.models import RunResult, format_obs_date
 from econ_monitor.rules import Evaluation
-from econ_monitor.slack import SEVERITY_ORDER
 
 SEVERITY_LABEL = {"critical": "🔴 重大", "warning": "🟠 警告", "info": "🔵 情報"}
 
@@ -55,10 +55,22 @@ def build_markdown(result: RunResult) -> str:
             lines.append(f"- [{cfg.country_name(e.indicator.country)}] {e.indicator.name}（{e.indicator.source}:{e.indicator.series}）: {e.description} — {_esc(e.message)}")
 
     lines += ["", "## 全指標の最新値", "", "| 国 | 指標 | ソース | 最新値 | 前回差 | 観測期間 | 状態 |", "|---|---|---|---:|---:|---|---|"]
-    active_by_ind = {}
-    for e in ch.active:
+    for r in snapshot_rows(result):
+        lines.append(
+            f"| {r['country']} | {_esc(r['name'])} | {r['source']} "
+            f"| {r['value']} | {r['change']} | {r['period']} | {r['status']} |"
+        )
+    return "\n".join(lines) + "\n"
+
+
+def snapshot_rows(result: RunResult) -> List[Dict[str, str]]:
+    """全指標の最新値の一覧（国の並びは設定ファイルの countries の順）。"""
+    cfg = result.config
+    active_by_ind: Dict[str, list] = {}
+    for e in result.changes.active:
         active_by_ind.setdefault(e.indicator.id, []).append(e)
     country_order = {code: i for i, code in enumerate(cfg.countries)}
+    rows = []
     for s in sorted(result.snapshots, key=lambda s: (country_order.get(s.indicator.country, 99), s.indicator.source, s.indicator.id)):
         ind = s.indicator
         if s.status == "ok":
@@ -69,11 +81,16 @@ def build_markdown(result: RunResult) -> str:
         else:
             status = "⚠️ 取得失敗" if s.status == "error" else "⏭ スキップ"
             value, change = "-", "-"
-        lines.append(
-            f"| {cfg.country_name(ind.country)} | {_esc(ind.name)} | {ind.source}:{ind.series} "
-            f"| {value} | {change} | {format_obs_date(s.obs_date, s.frequency)} | {status} |"
-        )
-    return "\n".join(lines) + "\n"
+        rows.append({
+            "country": cfg.country_name(ind.country),
+            "name": ind.name,
+            "source": f"{ind.source}:{ind.series}",
+            "value": value,
+            "change": change,
+            "period": format_obs_date(s.obs_date, s.frequency),
+            "status": status,
+        })
+    return rows
 
 
 def write_report(result: RunResult, path: str | Path | None) -> str:

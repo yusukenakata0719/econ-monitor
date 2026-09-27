@@ -1,6 +1,6 @@
 # econ-monitor — 主要国マクロ経済モニター
 
-FRED・日本銀行・世界銀行の API から主要国のマクロ経済指標を毎日取得し、異常を検知したら Slack に通知するツールです。GitHub Actions で自動実行します。
+FRED・日本銀行・世界銀行の API から主要国のマクロ経済指標を毎日取得し、異常を検知したらメールで通知するツールです。GitHub Actions で自動実行します。
 
 ```
 GitHub Actions (cron: 毎日 08:00 JST / 月曜 08:30 JST にダイジェスト)
@@ -13,7 +13,7 @@ GitHub Actions (cron: 毎日 08:00 JST / 月曜 08:30 JST にダイジェスト)
   ├─ 検知 ──── 閾値ルール・Z スコア（外れ値）・データ更新停止・取得エラー
   ├─ 差分 ──── 前回の状態（actions/cache で保持）と比較して「新規発生」「解消」だけを抽出
   │
-  └─ 出力 ──── Slack 通知（Block Kit）／ジョブサマリー＋Markdown レポート＋取得データ CSV（artifact）
+  └─ 出力 ──── メール通知（HTML）／ジョブサマリー＋Markdown レポート＋取得データ CSV（artifact）
 ```
 
 ## 監視している指標（`config/indicators.yaml`）
@@ -35,25 +35,33 @@ git init && git add . && git commit -m "Initial commit"
 gh repo create econ-monitor --private --source . --push
 ```
 
-### 2. API キーと Slack Webhook を用意
+### 2. API キーとメール送信用のアカウントを用意
 
-| 用途 | 取得方法 |
-|---|---|
-| `FRED_API_KEY` | https://fred.stlouisfed.org/docs/api/api_key.html で無料登録して発行 |
-| `SLACK_WEBHOOK_URL` | Slack アプリを作成 →「Incoming Webhooks」を有効化 → 通知先チャンネルを選んで URL を発行 |
+- **FRED API キー**: https://fred.stlouisfed.org/docs/api/api_key.html で無料登録して発行（日本銀行・世界銀行はキー不要）
+- **送信用メールアカウント**: SMTP で送信できるアカウントの「アプリ用パスワード」を発行します（通常のログインパスワードは使えません）
 
-日本銀行・世界銀行の API はキー不要です。
+| サービス | SMTP_HOST | SMTP_PORT | SMTP_USERNAME | アプリ用パスワードの発行 |
+|---|---|---|---|---|
+| Gmail | `smtp.gmail.com` | `587` | Gmail アドレス | 2 段階認証を有効にして https://myaccount.google.com/apppasswords |
+| iCloud メール | `smtp.mail.me.com` | `587` | iCloud メールアドレス（`@icloud.com` など） | https://account.apple.com →「サインインとセキュリティ」→「App 用パスワード」 |
 
 ### 3. GitHub Secrets に登録
 
-```bash
-gh secret set FRED_API_KEY
-gh secret set SLACK_WEBHOOK_URL
-```
+リポジトリの **Settings → Secrets and variables → Actions → New repository secret** から登録します（値をチャットや端末の履歴に残さないため、ブラウザでの登録がおすすめです）。
+
+| Secret | 内容 | 必須 |
+|---|---|---|
+| `FRED_API_KEY` | FRED の API キー | ✅ |
+| `SMTP_HOST` | 上の表の SMTP サーバー | ✅ |
+| `SMTP_USERNAME` | ログインに使うメールアドレス | ✅ |
+| `SMTP_PASSWORD` | アプリ用パスワード | ✅ |
+| `MAIL_TO` | 宛先（カンマ区切りで複数可） | ✅ |
+| `SMTP_PORT` | 省略時 `587`（STARTTLS）。`465` なら SSL | |
+| `MAIL_FROM` | 差出人。省略時は `SMTP_USERNAME`（iCloud・Gmail は自分のアドレスのままにする） | |
 
 ### 4. 動作確認と初回実行
 
-1. **Actions → Macro Monitor → Run workflow** で `dry_run` にチェックして実行し、ジョブサマリーのレポートを確認
+1. **Actions → Macro Monitor → Run workflow** で `dry_run` にチェックして実行し、ジョブサマリーのレポートと artifact の `email_preview.html`（メールの見た目）を確認
 2. 初回の本番実行では、現在すでに発生している異常がすべて「新規」として通知されます。
    一括通知が不要なら `no_notify` にチェックして 1 回実行し、状態だけ作っておきます
 3. 以降は毎日 08:00 JST に自動実行され、変化があったときだけ通知されます
@@ -64,17 +72,21 @@ gh secret set SLACK_WEBHOOK_URL
 - 条件を満たさなくなったら「解消」を通知します（Z スコアや政策金利変更のような単発イベントは解消通知なし。`notify_resolved` で変更可）
 - 毎週月曜はダイジェストとして、継続中の異常も含めて一覧を送ります
 - データ取得エラーや、系列が長期間更新されていない（公表停止の疑い）場合も「データ品質」として通知します
-- Slack への送信に失敗した場合は状態を保存しないため、次回の実行で再通知されます
+- メールの送信に失敗した場合は状態を保存しないため、次回の実行で再通知されます
 
-通知例:
+メールの例（HTML 版では指標名がデータの出典ページへのリンクになり、末尾に全指標の最新値の一覧表が付きます）:
 
 ```
-📊 マクロ経済モニター
+件名: [マクロ経済モニター] 新規 2件 / 解消 1件 / 継続 3件｜米国 失業率 ほか
+
+マクロ経済モニター
 2026-09-27 08:00 JST | 新規 2件 · 解消 1件 · 継続 3件
-🚨 新たに検知した異常
+
+■ 新たに検知した異常
 🔴 [米国] 失業率 — サームルール発動（景気後退シグナル）: サーム指標 0.53%（閾値: 0.50以上）（2026-08）
 🟠 [日本] 国内企業物価指数 — 企業物価が前年比 5% 超: 前年比 7.59%（閾値: 5.00以上）（2026-08）
-✅ 解消
+
+■ 解消
 ✅ [米国] 長短金利差（10年-2年） — 逆イールド: 水準 0.36%pt（閾値: 0以下）（2026-09-25）（2026-07-01 から継続）
 ```
 
@@ -127,7 +139,7 @@ python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 
 export FRED_API_KEY=...            # 未設定なら FRED の指標はスキップ
-econ-monitor --dry-run             # Slack に送らず、ペイロードを表示（状態も保存しない）
+econ-monitor --dry-run             # メールを送らず本文を表示し、reports/email_preview.html を出力（状態も保存しない）
 econ-monitor --mode digest --dry-run
 pytest                             # テスト（API はモック）
 ```
@@ -143,7 +155,8 @@ src/econ_monitor/
   transforms.py                 前年比・サーム指標などの変換
   rules.py                      閾値・Z スコア・更新停止の判定
   state.py                      アラート状態の保存と差分（新規／継続／解消）
-  slack.py / report.py          Slack 通知とMarkdown レポート
+  digest.py                     通知に載せる内容（新規・解消・継続・データ品質）の組み立て
+  mailer.py / report.py         メール通知（SMTP）と Markdown レポート
   pipeline.py / cli.py          全体の処理とコマンドライン
 .github/workflows/
   macro-monitor.yml             定期実行（毎日＋週次ダイジェスト）

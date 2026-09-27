@@ -3,17 +3,19 @@
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import os
 import sys
 from datetime import datetime
+from pathlib import Path
 from typing import List, Optional
 from zoneinfo import ZoneInfo
 
-from econ_monitor import slack
+from econ_monitor import mailer
 from econ_monitor.config import ConfigError, load_config
+from econ_monitor.digest import build_digest, should_notify
 from econ_monitor.http import make_session
+from econ_monitor.models import RunResult
 from econ_monitor.pipeline import run
 from econ_monitor.report import write_report
 from econ_monitor.sources import build_sources
@@ -22,7 +24,7 @@ log = logging.getLogger("econ_monitor")
 
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="主要国マクロ経済指標の異常検知と Slack 通知")
+    p = argparse.ArgumentParser(description="主要国マクロ経済指標の異常検知とメール通知")
     p.add_argument("--config", default="config/indicators.yaml", help="指標定義ファイル")
     p.add_argument("--state", default="state/alerts.json", help="アラート状態ファイル（実行間で引き継ぐ）")
     p.add_argument(
@@ -33,8 +35,8 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     )
     p.add_argument("--report", default="reports/report.md", help="Markdown レポートの出力先")
     p.add_argument("--data-dir", default=None, help="取得した系列を CSV で保存するディレクトリ")
-    p.add_argument("--dry-run", action="store_true", help="Slack に送信せず、状態も保存しない（ペイロードを標準出力に表示）")
-    p.add_argument("--no-notify", action="store_true", help="Slack に送信せず状態だけ更新する（初回の状態作成などに）")
+    p.add_argument("--dry-run", action="store_true", help="メールを送信せず、状態も保存しない（本文を標準出力に、HTML をレポートと同じ場所に出力）")
+    p.add_argument("--no-notify", action="store_true", help="メールを送信せず状態だけ更新する（初回の状態作成などに）")
     p.add_argument("-v", "--verbose", action="store_true")
     return p.parse_args(argv)
 
@@ -69,24 +71,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     for e in ch.new:
         log.info("[新規] %s/%s: %s", e.indicator.id, e.rule_id, e.message)
 
-    if slack.should_notify(result):
-        payload = slack.build_payload(result)
-        webhook = os.environ.get("SLACK_WEBHOOK_URL", "")
-        if args.dry_run:
-            print(json.dumps(payload, ensure_ascii=False, indent=2))
-        elif args.no_notify:
-            log.info("--no-notify のため Slack 通知をスキップ")
-        elif not webhook:
-            log.warning("SLACK_WEBHOOK_URL が未設定のため通知をスキップ（状態は保存しません）")
+    if should_notify(result):
+        if not _notify(args, result):
+            # 状態を保存しないことで、次回実行時に同じ変化を再通知する
             return 1
-        else:
-            try:
-                slack.send(webhook, payload, session)
-                log.info("Slack に通知しました")
-            except Exception as e:  # noqa: BLE001
-                # 状態を保存しないことで、次回実行時に同じ変化を再通知する
-                log.error("%s", e)
-                return 1
     else:
         log.info("通知対象の変化はありません")
 
@@ -98,6 +86,35 @@ def main(argv: Optional[List[str]] = None) -> int:
         log.error("すべての系列の取得に失敗しました")
         return 1
     return 0
+
+
+def _notify(args: argparse.Namespace, result: RunResult) -> bool:
+    """メールで通知する。送信できなかった（設定不足・送信失敗）場合は False。"""
+    digest = build_digest(result)
+    if args.dry_run:
+        msg = mailer.build_message(result, digest, "sender@example.com", ["recipient@example.com"])
+        print(f"Subject: {msg['Subject']}\n")
+        print(mailer.build_text(result, digest))
+        if args.report:
+            preview = Path(args.report).with_name("email_preview.html")
+            preview.write_text(mailer.build_html(result, digest), encoding="utf-8")
+            log.info("メールのプレビューを %s に保存しました", preview)
+        return True
+    if args.no_notify:
+        log.info("--no-notify のため通知をスキップ")
+        return True
+    missing = mailer.SmtpSettings.missing()
+    if missing:
+        log.error("メール送信の設定が不足しているため通知できません: %s（状態は保存しません）", ", ".join(missing))
+        return False
+    try:
+        settings = mailer.SmtpSettings.from_env()
+        mailer.send(mailer.build_message(result, digest, settings.sender, settings.recipients), settings)
+    except Exception as e:  # noqa: BLE001
+        log.error("%s", e)
+        return False
+    log.info("メールを %d 件の宛先に送信しました", len(settings.recipients))
+    return True
 
 
 def _github_run_url() -> Optional[str]:
