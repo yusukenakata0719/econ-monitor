@@ -404,6 +404,7 @@ indicators:
     source: fred
     series: LRHUTTTTGBM156S
     unit: "%"
+    max_age_days: 150  # OECD 経由のため公表ラグが 3-4 ヶ月ある
     rules:
       - id: sahm
         type: threshold
