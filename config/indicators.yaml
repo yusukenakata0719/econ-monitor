@@ -1,0 +1,648 @@
+# 監視対象の指標と異常検知ルール
+#
+# ■ 指標の共通キー
+#   id        : 一意な ID（状態管理のキー。変更すると別指標扱いになる）
+#   name      : 表示名
+#   country   : 国コード（下の countries で表示名に変換）
+#   source    : fred / boj / worldbank
+#   series    : 各 API の系列コード（世界銀行は指標コード）
+#   unit      : 表示用の単位
+#   db, frequency : 日銀のみ必須（DB 名と頻度 D/W/M/Q/H/A）
+#   params    : FRED のみ。observations API への追加パラメータ（例: {frequency: m, aggregation_method: avg}）
+#   countries : 同じ定義を複数国に展開（id は <id>_<国コード> になる）
+#   lookback_years : 取得する年数（既定は settings.lookback_years）
+#   max_age_days   : 最新観測期間の末日からこの日数を超えると「更新停止」を通知（既定は頻度から自動）
+#
+# ■ ルール（rules）
+#   type: threshold  最新値が above 以上 / below 以下で発火
+#   type: zscore     最新値が直近 window 期の分布から threshold σ 以上乖離で発火
+#                    （robust: true で中央値・MAD を使用、direction: up/down/both）
+#   transform        評価前の変換: level / diff / pct / yoy / yoy_diff / ann_pct / sahm
+#   periods          diff・pct・ann_pct の期数
+#   severity         info / warning / critical
+#   notify_resolved  解消時に通知するか（既定: threshold=true, zscore=false）
+#
+# 同じ異常は発生時に 1 回だけ通知し、解消時に（設定により）もう 1 回通知します。
+
+settings:
+  lookback_years: 20
+  timezone: Asia/Tokyo
+
+countries:
+  GL: グローバル
+  US: 米国
+  JP: 日本
+  EA: ユーロ圏
+  DE: ドイツ
+  GB: 英国
+  FR: フランス
+  IT: イタリア
+  CA: カナダ
+  CN: 中国
+  IN: インド
+
+rule_defaults:
+  zscore:
+    window: 120
+    threshold: 3.0
+    min_periods: 36
+
+indicators:
+  # ───────────────────────── 米国（FRED） ─────────────────────────
+  - id: us_unrate
+    name: 失業率
+    country: US
+    source: fred
+    series: UNRATE
+    unit: "%"
+    rules:
+      - id: sahm
+        type: threshold
+        transform: sahm
+        above: 0.5
+        severity: critical
+        description: サームルール発動（景気後退シグナル）
+      - id: jump
+        type: zscore
+        transform: diff
+        direction: up
+        description: 失業率の急上昇
+
+  - id: us_payems
+    name: 非農業部門雇用者数
+    country: US
+    source: fred
+    series: PAYEMS
+    unit: 千人
+    rules:
+      - id: negative
+        type: threshold
+        transform: diff
+        below: 0
+        description: 雇用者数が前月比マイナス
+      - id: shock
+        type: zscore
+        transform: diff
+        robust: true
+        threshold: 3.5
+        description: 雇用者数の予想外の変動
+
+  - id: us_cpi
+    name: 消費者物価指数（CPI）
+    country: US
+    source: fred
+    series: CPIAUCSL
+    rules:
+      - id: high_inflation
+        type: threshold
+        transform: yoy
+        above: 4.0
+        description: インフレ率 4% 超
+      - id: deflation
+        type: threshold
+        transform: yoy
+        below: 0
+        description: 物価の前年割れ
+      - id: mom_shock
+        type: zscore
+        transform: pct
+        description: 前月比の異常な変動
+
+  - id: us_core_pce
+    name: コア PCE デフレーター
+    country: US
+    source: fred
+    series: PCEPILFE
+    rules:
+      - id: above_target
+        type: threshold
+        transform: yoy
+        above: 3.5
+        description: コアインフレが目標を大幅超過
+
+  - id: us_gdp
+    name: 実質 GDP
+    country: US
+    source: fred
+    series: GDPC1
+    unit: 十億ドル
+    lookback_years: 40
+    rules:
+      - id: contraction
+        type: threshold
+        transform: ann_pct
+        below: 0
+        description: 実質 GDP がマイナス成長
+      - id: shock
+        type: zscore
+        transform: ann_pct
+        window: 80
+        min_periods: 40
+        description: 成長率の異常な変動
+
+  - id: us_indpro
+    name: 鉱工業生産指数
+    country: US
+    source: fred
+    series: INDPRO
+    rules:
+      - id: yoy_decline
+        type: threshold
+        transform: yoy
+        below: -3.0
+        description: 鉱工業生産が前年比 -3% 以下
+
+  - id: us_claims
+    name: 新規失業保険申請件数
+    country: US
+    source: fred
+    series: ICSA
+    unit: 件
+    rules:
+      - id: surge
+        type: zscore
+        transform: pct
+        periods: 4
+        window: 260
+        min_periods: 104
+        robust: true
+        direction: up
+        description: 申請件数の急増（4 週変化率）
+      - id: high_level
+        type: threshold
+        above: 300000
+        description: 申請件数 30 万件超
+
+  - id: us_t10y2y
+    name: 長短金利差（10年-2年）
+    country: US
+    source: fred
+    series: T10Y2Y
+    unit: "%pt"
+    rules:
+      - id: inversion
+        type: threshold
+        below: 0
+        description: 逆イールド
+
+  - id: us_t10y3m
+    name: 長短金利差（10年-3ヶ月）
+    country: US
+    source: fred
+    series: T10Y3M
+    unit: "%pt"
+    rules:
+      - id: inversion
+        type: threshold
+        below: 0
+        description: 逆イールド
+
+  - id: us_dgs10
+    name: 米 10 年国債利回り
+    country: US
+    source: fred
+    series: DGS10
+    unit: "%"
+    rules:
+      - id: weekly_move
+        type: zscore
+        transform: diff
+        periods: 5
+        window: 750
+        min_periods: 250
+        threshold: 3.5
+        description: 金利の急変動（5 営業日）
+
+  - id: us_policy_rate
+    name: FF 金利（実効）
+    country: US
+    source: fred
+    series: DFF
+    unit: "%"
+    rules:
+      - id: policy_change
+        type: threshold
+        transform: diff
+        periods: 5
+        above: 0.2
+        below: -0.2
+        severity: info
+        notify_resolved: false
+        description: 政策金利の変更
+
+  - id: us_vix
+    name: VIX 指数
+    country: GL
+    source: fred
+    series: VIXCLS
+    rules:
+      - id: elevated
+        type: threshold
+        above: 30
+        description: 市場の恐怖指数が高水準
+      - id: extreme
+        type: threshold
+        above: 45
+        severity: critical
+        description: 市場の恐怖指数が危機的水準
+
+  - id: us_hy_spread
+    name: 米ハイイールド債スプレッド
+    country: US
+    source: fred
+    series: BAMLH0A0HYM2
+    unit: "%pt"
+    rules:
+      - id: wide
+        type: threshold
+        above: 5.0
+        description: 信用スプレッドが拡大
+      - id: widening
+        type: threshold
+        transform: diff
+        periods: 20
+        above: 1.0
+        severity: critical
+        notify_resolved: false
+        description: 信用スプレッドの急拡大（1 ヶ月で +1%pt）
+
+  - id: wti
+    name: WTI 原油価格
+    country: GL
+    source: fred
+    series: DCOILWTICO
+    unit: ドル
+    rules:
+      - id: monthly_move
+        type: zscore
+        transform: pct
+        periods: 20
+        window: 750
+        min_periods: 250
+        description: 原油価格の急変動（1 ヶ月）
+
+  - id: us_dollar
+    name: ドル実効為替レート（Broad）
+    country: US
+    source: fred
+    series: DTWEXBGS
+    rules:
+      - id: monthly_move
+        type: zscore
+        transform: pct
+        periods: 20
+        window: 750
+        min_periods: 250
+        description: ドルの急変動（1 ヶ月）
+
+  - id: us_sentiment
+    name: ミシガン大学消費者信頼感指数
+    country: US
+    source: fred
+    series: UMCSENT
+    rules:
+      - id: drop
+        type: zscore
+        transform: diff
+        direction: down
+        description: 消費者心理の急悪化
+
+  # ───────────────────────── ユーロ圏・英国（FRED） ─────────────────────────
+  - id: ea_hicp
+    name: HICP（消費者物価）
+    country: EA
+    source: fred
+    series: CP0000EZ19M086NEST
+    rules:
+      - id: high_inflation
+        type: threshold
+        transform: yoy
+        above: 4.0
+        description: インフレ率 4% 超
+      - id: deflation
+        type: threshold
+        transform: yoy
+        below: 0
+        description: 物価の前年割れ
+
+  - id: ea_policy_rate
+    name: ECB 預金ファシリティ金利
+    country: EA
+    source: fred
+    series: ECBDFR
+    unit: "%"
+    rules:
+      - id: policy_change
+        type: threshold
+        transform: diff
+        periods: 5
+        above: 0.1
+        below: -0.1
+        severity: info
+        notify_resolved: false
+        description: 政策金利の変更
+
+  - id: de_10y
+    name: 独 10 年国債利回り
+    country: DE
+    source: fred
+    series: IRLTLT01DEM156N
+    unit: "%"
+    rules:
+      - id: move
+        type: zscore
+        transform: diff
+        description: 金利の急変動（月次）
+
+  - id: eurusd
+    name: ユーロ/ドル
+    country: EA
+    source: fred
+    series: DEXUSEU
+    unit: ドル
+    rules:
+      - id: monthly_move
+        type: zscore
+        transform: pct
+        periods: 20
+        window: 750
+        min_periods: 250
+        description: ユーロの急変動（1 ヶ月）
+
+  - id: gb_10y
+    name: 英 10 年国債利回り
+    country: GB
+    source: fred
+    series: IRLTLT01GBM156N
+    unit: "%"
+    rules:
+      - id: move
+        type: zscore
+        transform: diff
+        description: 金利の急変動（月次）
+
+  - id: gb_policy_rate
+    name: SONIA
+    country: GB
+    source: fred
+    series: IUDSOIA
+    unit: "%"
+    rules:
+      - id: policy_change
+        type: threshold
+        transform: diff
+        periods: 5
+        above: 0.15
+        below: -0.15
+        severity: info
+        notify_resolved: false
+        description: 政策金利の変更
+
+  - id: gb_unrate
+    name: 失業率
+    country: GB
+    source: fred
+    series: LRHUTTTTGBM156S
+    unit: "%"
+    rules:
+      - id: sahm
+        type: threshold
+        transform: sahm
+        above: 0.5
+        severity: critical
+        description: サームルール発動（景気後退シグナル）
+
+  - id: gbpusd
+    name: ポンド/ドル
+    country: GB
+    source: fred
+    series: DEXUSUK
+    unit: ドル
+    rules:
+      - id: monthly_move
+        type: zscore
+        transform: pct
+        periods: 20
+        window: 750
+        min_periods: 250
+        description: ポンドの急変動（1 ヶ月）
+
+  # ───────────────────────── 中国（FRED） ─────────────────────────
+  - id: usdcny
+    name: 人民元/ドル
+    country: CN
+    source: fred
+    series: DEXCHUS
+    unit: 元
+    rules:
+      - id: monthly_move
+        type: zscore
+        transform: pct
+        periods: 20
+        window: 750
+        min_periods: 250
+        threshold: 3.5
+        description: 人民元の急変動（1 ヶ月）
+
+  # ───────────────────────── 日本（日本銀行） ─────────────────────────
+  - id: jp_call_rate
+    name: 無担保コール翌日物金利
+    country: JP
+    source: boj
+    db: FM01
+    series: STRDCLUCON
+    frequency: D
+    unit: "%"
+    rules:
+      - id: policy_change
+        type: threshold
+        transform: diff
+        periods: 5
+        above: 0.15
+        below: -0.15
+        severity: info
+        notify_resolved: false
+        description: 政策金利の変更
+
+  - id: jp_usdjpy
+    name: ドル/円（東京市場 9 時）
+    country: JP
+    source: boj
+    db: FM08
+    series: FXERD01
+    frequency: D
+    unit: 円
+    rules:
+      - id: weekly_move
+        type: zscore
+        transform: pct
+        periods: 5
+        window: 750
+        min_periods: 250
+        threshold: 3.5
+        description: 円相場の急変動（5 営業日）
+      - id: weak_yen
+        type: threshold
+        above: 160
+        description: 円安が介入警戒水準
+
+  - id: jp_reer
+    name: 円の実質実効為替レート
+    country: JP
+    source: boj
+    db: FM09
+    series: FX180110002
+    frequency: M
+    rules:
+      - id: move
+        type: zscore
+        transform: pct
+        description: 実効レートの急変動
+
+  - id: jp_ppi
+    name: 国内企業物価指数
+    country: JP
+    source: boj
+    db: PR01
+    series: PRCG20_2200000000
+    frequency: M
+    rules:
+      - id: high_inflation
+        type: threshold
+        transform: yoy
+        above: 5.0
+        description: 企業物価が前年比 5% 超
+      - id: mom_shock
+        type: zscore
+        transform: pct
+        description: 前月比の異常な変動
+
+  - id: jp_sppi
+    name: 企業向けサービス価格指数
+    country: JP
+    source: boj
+    db: PR02
+    series: PRCS20_5200000000
+    frequency: M
+    rules:
+      - id: mom_shock
+        type: zscore
+        transform: pct
+        window: 60
+        min_periods: 36
+        description: 前月比の異常な変動
+
+  - id: jp_tankan
+    name: 日銀短観 業況判断 DI（大企業製造業）
+    country: JP
+    source: boj
+    db: CO
+    series: TK99F1000601GCQ01000
+    frequency: Q
+    unit: "%pt"
+    lookback_years: 30
+    rules:
+      - id: sharp_drop
+        type: threshold
+        transform: diff
+        below: -8
+        description: 業況判断の大幅悪化（前期差 -8pt 以下）
+      - id: negative
+        type: threshold
+        below: 0
+        severity: info
+        description: 業況判断が「悪い」超
+
+  - id: jp_m2
+    name: マネーストック M2（平残）
+    country: JP
+    source: boj
+    db: MD02
+    series: MAM1NAM2M2MO
+    frequency: M
+    unit: 億円
+    rules:
+      - id: growth_shift
+        type: zscore
+        transform: yoy
+        description: M2 伸び率の異常
+
+  - id: jp_current_account
+    name: 経常収支
+    country: JP
+    source: boj
+    db: BP01
+    series: BPBP6JYNCB
+    frequency: M
+    unit: 億円
+    rules:
+      - id: shift
+        type: zscore
+        transform: yoy_diff
+        description: 経常収支の前年差の異常
+
+  # ───────────────────────── 主要国の年次指標（世界銀行） ─────────────────────────
+  - id: wb_gdp_growth
+    name: 実質 GDP 成長率（年次）
+    source: worldbank
+    series: NY.GDP.MKTP.KD.ZG
+    countries: [US, JP, CN, DE, GB, FR, IT, CA, IN]
+    unit: "%"
+    lookback_years: 45
+    rules:
+      - id: recession
+        type: threshold
+        below: 0
+        description: 年間マイナス成長
+      - id: shock
+        type: zscore
+        transform: diff
+        window: 40
+        min_periods: 20
+        threshold: 2.5
+        description: 成長率の大幅な変化
+
+  - id: wb_inflation
+    name: インフレ率（年次 CPI）
+    source: worldbank
+    series: FP.CPI.TOTL.ZG
+    countries: [US, JP, CN, DE, GB, FR, IT, CA, IN]
+    unit: "%"
+    lookback_years: 45
+    rules:
+      - id: high
+        type: threshold
+        above: 6.0
+        description: 年間インフレ率 6% 超
+      - id: deflation
+        type: threshold
+        below: 0
+        severity: info
+        description: 年間でデフレ
+
+  - id: wb_unemployment
+    name: 失業率（年次・ILO 推計）
+    source: worldbank
+    series: SL.UEM.TOTL.ZS
+    countries: [US, JP, CN, DE, GB, FR, IT, CA, IN]
+    unit: "%"
+    lookback_years: 45
+    rules:
+      - id: rise
+        type: threshold
+        transform: diff
+        above: 1.5
+        description: 失業率が前年比 1.5%pt 以上上昇
+
+  - id: wb_current_account
+    name: 経常収支（GDP 比）
+    source: worldbank
+    series: BN.CAB.XOKA.GD.ZS
+    countries: [US, JP, CN, DE, GB, FR, IT, CA, IN]
+    unit: "%"
+    lookback_years: 45
+    rules:
+      - id: large_deficit
+        type: threshold
+        below: -5.0
+        description: 経常赤字が GDP 比 5% 超
